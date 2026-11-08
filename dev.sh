@@ -16,8 +16,8 @@ if [ ! -d "$WEB_DIR/node_modules" ]; then
   exit 1
 fi
 
-if [ ! -f "$WEB_DIR/public/mediapipe/face_landmarker.task" ]; then
-  echo "mediapipe assets missing. Run: cd frontend && npm run vendor:mediapipe" >&2
+if [ ! -f "$API_DIR/models/hyperswap_1a_256.onnx" ] || [ ! -f "$API_DIR/models/w600k_r50.onnx" ] || [ ! -f "$API_DIR/models/face_detection_yunet_2023mar.onnx" ]; then
+  echo "ONNX models missing. Run: backend/.venv/bin/python backend/scripts/fetch_models.py" >&2
   exit 1
 fi
 

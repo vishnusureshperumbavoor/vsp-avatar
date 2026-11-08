@@ -1,24 +1,40 @@
-# VSP Avatar
+# VSP Avatar — Local Realtime Face Swap
 
-Local **webcam → VRM 3D avatar** studio. A FastAPI backend with a React +
-three.js frontend that tracks your face in the browser and drives a VRM avatar in
-real time. No cloud inference — the webcam frames never leave the machine.
+Local **webcam → photoreal face swap** studio. A FastAPI backend runs a
+Hyperswap face-swap pipeline on your CPU; a React frontend captures your
+webcam, streams frames over a WebSocket, and renders the swapped result. No
+cloud inference — frames never leave the machine.
 
-- **Face tracking:** MediaPipe Face Landmarker (vendored WASM + model)
-- **Rendering:** three.js + [`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm)
-- **Backend:** FastAPI (avatar catalogue/upload, presets, WebSocket pose relay)
-- **Capture:** canvas `captureStream()` → WebM download; OBS Virtual Camera for calls
+This replaces the earlier VRM/three.js avatar path (still recoverable from git
+history). The output is a realistic face, not a 3D character.
 
 ```
 Browser (React)
-  webcam -> MediaPipe Face Landmarker (wasm) -> blendshapes + head pose
-         -> three.js / three-vrm render -> canvas (record / virtual camera)
-
+  webcam -> JPEG frames over WebSocket ->
 FastAPI
-  GET/POST /api/avatars          catalogue + upload .vrm
-  GET/PUT/DELETE /api/presets    settings presets
-  WS /ws/tracking/{room}         local pose relay (mirror to OBS / second view)
+  YuNet detector -> 256px ArcFace align -> Hyperswap 256 -> mask + colour paste
+  -> JPEG frames back -> canvas (record / OBS browser source)
 ```
+
+- **Face tracking / alignment:** OpenCV YuNet (5 landmarks) + ArcFace template
+- **Identity embedding:** InsightFace `w600k_r50` (512-d ArcFace embedding)
+- **Swap generator:** FaceFusion Hyperswap 256 on ONNX Runtime (CPU)
+- **Backend:** FastAPI (identity portraits, presets, WebSocket swap + viewer relay)
+- **Capture:** canvas `captureStream()` → WebM download; OBS browser source for calls
+
+## Performance on this machine (measured)
+
+CPU-only, WSL2, i5-1235U (12 threads):
+
+| Mode | Behaviour | Frame rate |
+| --- | --- | --- |
+| `smooth` (default) | Composites every frame with the latest generated face texture; refreshes the texture asynchronously | **~8–12 fps preview**, texture refresh every **~0.6–1 s** |
+| `exact` | Full generator on every frame | **~1.3–1.6 fps** (~0.6–0.8 s/frame) |
+
+Hyperswap 256 is both faster and sharper than the previous `inswapper_128` path.
+`smooth` keeps the preview responsive while expressions/identity refresh at the
+CPU's ceiling, so lip-sync lags the refresh interval. Real-time 30 fps still
+needs a GPU (see [Next steps](#next-steps)).
 
 ## Project layout
 
@@ -26,32 +42,38 @@ FastAPI
 vsp-avatar/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            FastAPI entrypoint
-│   │   ├── config.py          paths + env
-│   │   ├── avatar_store.py    VRM catalogue/upload
-│   │   ├── preset_store.py    JSON presets
-│   │   └── routers/           health, avatars, presets, tracking
-│   ├── static/avatars/        sample CC0 VRM (rose-cc0)
-│   ├── scripts/               fetch_sample_avatar.py
+│   │   ├── main.py              FastAPI entrypoint + engine warm-up
+│   │   ├── config.py            paths, model files, limits
+│   │   ├── schemas.py           API models
+│   │   ├── face_swap/
+│   │   │   ├── align.py         5-point template, crop, masked colour paste
+│   │   │   ├── engine.py        YuNet + ArcFace + Hyperswap 256 (CPU)
+│   │   │   └── store.py         identity portraits + embeddings
+│   │   └── routers/             health, identities, presets, swap
+│   ├── models/                  ONNX models (fetched, gitignored)
+│   ├── data/faces/              uploaded identities (gitignored)
+│   ├── scripts/fetch_models.py  downloads the three ONNX models
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── components/AvatarStage.tsx   three.js + three-vrm renderer
-│   │   ├── hooks/useFaceTracking.ts     MediaPipe loop
-│   │   ├── lib/expressionMap.ts         ARKit → VRM expressions
-│   │   ├── lib/headPose.ts              landmarks → yaw/pitch/roll
-│   │   └── App.tsx
-│   ├── scripts/vendor-mediapipe.mjs     copies wasm + model locally
-│   └── vite.config.ts                   /api + /ws proxy
+│   │   ├── App.tsx              driver UI + viewer page routing
+│   │   ├── hooks/useFaceSwap.ts webcam → WS → canvas loop
+│   │   ├── hooks/useSwapViewer.ts read-only viewer socket
+│   │   ├── lib/frame.ts         JPEG frame → canvas painter
+│   │   ├── api.ts               REST + WS helpers
+│   │   └── types.ts             shared types
+│   ├── vite.config.ts           /api + /ws proxy
+│   └── package.json
 ├── dev.sh
 └── README.md
 ```
 
 ## Prerequisites
 
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/) (or a plain venv + pip)
+- Python 3.11+ (tested on 3.13) and [uv](https://docs.astral.sh/uv/)
 - Node.js 20+
 - A webcam and a WebGL2-capable browser (Chrome/Edge recommended)
+- ~600 MB free disk for the ONNX models
 
 ## Backend setup
 
@@ -60,8 +82,8 @@ cd backend
 uv venv .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 
-# CC0 sample avatar (Rose, 100Avatars). Safe to re-run.
-.venv/bin/python scripts/fetch_sample_avatar.py
+# Hyperswap 256 (~385 MB), w600k_r50 (~167 MB), YuNet (~230 KB)
+.venv/bin/python scripts/fetch_models.py
 
 .venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -73,80 +95,114 @@ API docs: http://127.0.0.1:8000/docs
 ```bash
 cd frontend
 npm install
-npm run vendor:mediapipe     # copies WASM runtime + downloads face_landmarker.task
 npm run dev
 ```
 
 App: http://127.0.0.1:5173
 
-Or run both with:
-
-```bash
-./dev.sh
-```
+Or run both with `./dev.sh`.
 
 ## Using it
 
-1. Pick an avatar (or upload a `.vrm`).
-2. **Start camera** and allow webcam access.
-3. The avatar mirrors your expressions and head pose.
-4. **Record avatar** downloads a WebM of the rendered canvas.
-5. For Zoom/Meet/Discord, add the app (or an OBS browser source) to
-   **OBS Virtual Camera**. On Linux use `v4l2loopback`.
+1. **Upload a source portrait** (the face you want to appear as). One clear,
+   front-facing face works best; the backend detects it, stores its embedding,
+   and makes a thumbnail.
+2. **Start the camera** and allow webcam access.
+3. The preview updates in `smooth` mode at ~12–16 fps while the swap texture
+   refreshes in the background. (Frame-accurate mode is available over the
+   WebSocket protocol as `{"type":"config","mode":"exact"}`, but is not yet
+   exposed as a UI toggle.)
+4. **Record result** downloads a WebM of the rendered canvas.
+5. For Zoom/Meet/Discord, add the **viewer URL** (`?viewer=1&room=main`) as an
+   OBS browser source, then send OBS Virtual Camera to your call. On Linux use
+   `v4l2loopback`.
+
+The **viewer URL** subscribes to the same room as the driver. Multiple viewers
+are supported; each has a single-frame mailbox so a slow viewer drops old frames
+instead of blocking the driver.
 
 ## API
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/health` | health/version |
-| GET | `/api/avatars` | list VRM/GLB avatars |
-| POST | `/api/avatars` | upload (`multipart/form-data`, field `file`) |
-| GET | `/api/avatars/{id}` | download avatar binary |
-| DELETE | `/api/avatars/{id}` | delete avatar |
+| GET | `/api/health` | health + engine readiness + missing models |
+| GET | `/api/identities` | list uploaded source faces |
+| POST | `/api/identities` | upload a portrait (`multipart/form-data`, field `file`) |
+| GET | `/api/identities/{id}/thumbnail` | portrait thumbnail |
+| DELETE | `/api/identities/{id}` | delete an identity |
 | GET | `/api/presets` | list presets |
 | GET/PUT/DELETE | `/api/presets/{name}` | read/write/delete a preset |
-| WS | `/ws/tracking/{room}` | relay JSON pose frames to peers in a room |
+| GET | `/api/swap/status` | engine status + active streams/viewers |
+| WS | `/ws/swap/{room}` | driver frame stream / viewer relay |
 
-### WebSocket frame shape
+### WebSocket protocol
 
-```json
-{
-  "t": 1730000000,
-  "blendshapes": { "jawOpen": 0.12, "eyeBlinkLeft": 0.02 },
-  "head": { "yaw": 0.01, "pitch": -0.03, "roll": 0.0 }
-}
+`/ws/swap/{room}?role=driver` (or `role=viewer`):
+
+```text
+driver -> server  {"type":"identity","id":"portrait"}
+                  {"type":"config","mode":"smooth","seamless":false,
+                   "strength":1.0,"quality":85,"colour_match":true}
+                  <binary JPEG frame>
+server -> driver  {"type":"hello","engine":{...}}
+                  {"type":"ready","engine":{...},"identity":"portrait"}
+                  {"type":"stats","ms":42.1,"swap_ms":2100,"swaps":3,
+                   "texture_age_ms":820,"face":true,"n":12,"bytes":66744}
+                  <binary JPEG frame>
+server -> viewer  {"type":"joined","role":"viewer","room":"main","viewers":1}
+                  <binary JPEG frame>
 ```
+
+One frame in flight per driver: the client waits for the response before sending
+the next frame, which bounds latency instead of queueing.
 
 ## Configuration
 
-Backend (environment variables):
+Backend environment variables:
 
+- `VSP_AVATAR_MAX_FACE_UPLOAD_MB` — portrait upload limit (default 16)
+- `VSP_AVATAR_MAX_SWAP_STREAMS` — concurrent generator streams (default 1)
+- `VSP_AVATAR_INFERENCE_THREADS` — onnxruntime intra-op threads (default 0 = auto)
 - `VSP_AVATAR_CORS_ORIGINS` — comma-separated allowed origins
-- `VSP_AVATAR_MAX_UPLOAD_MB` — upload limit (default 200)
 
 Frontend:
 
 - `VITE_API_BASE` — only needed when the frontend is served from a different
   origin than the API; the default Vite proxy handles local dev.
 
-## Notes & limits
+## Models & licensing
 
-- MediaPipe tries the **GPU** delegate first and falls back to **CPU**.
-- The sample avatar `rose-cc0.vrm` is CC0 (see
-  `backend/static/avatars/ATTRIBUTION.md`). Any avatar you upload remains your
-  responsibility — check its VRM license (`allowRedistribution`,
-  `commercialUsage`).
-- This is for **characters you own or have rights to**. Don't impersonate real
-  people (celebrity likenesses, Disney characters, etc.), and disclose AI
-  avatars when talking to other people.
-- The vendored `frontend/public/mediapipe/` directory (~33 MB) is gitignored;
-  re-run `npm run vendor:mediapipe` after a fresh clone.
-- The renderer starts the avatar in its rest (often T) pose; animation/idle
-  clips are a next step.
+`backend/scripts/fetch_models.py` downloads:
+
+| File | Source | Licence |
+| --- | --- | --- |
+| `hyperswap_1a_256.onnx` | FaceFusion models | check upstream FaceFusion terms |
+| `w600k_r50.onnx` | InsightFace `buffalo_l` | non-commercial research/testing |
+| `face_detection_yunet_2023mar.onnx` | OpenCV Zoo | MIT |
+
+See `backend/models/ATTRIBUTION.md` (written by the fetch script). If you plan to
+use this commercially, check the FaceFusion and InsightFace terms first.
+
+## Limitations
+
+- The generator is 256×256; detail comes from the source texture, not the target.
+- `smooth` mode lags expressions by the texture-refresh interval (~0.6–1 s here).
+- No restoration/enhancement pass yet (GFPGAN/RestoreFormer would sharpen
+  recordings but is far too slow for the live loop on CPU).
+- Extreme profile angles and heavy occlusion (hands, hair) can still seam.
+- No temporal stabilisation of the detection; slight jitter is possible frame
+  to frame.
 
 ## Next steps
 
-- Idle/blink animation clips + a pose editor
-- Optional WebSocket relay client so the avatar mirrors across tabs/OBS
-- Extract landmark→VRM mapping into a reusable `@vsp/avatar-core` package
-- Docker Compose (backend + built frontend) for one-command deployment
+- GPU path (CUDA on Linux; DirectML/OpenVINO on Windows) for real-time 30 fps
+- Optional GFPGAN/RestoreFormer pass for recorded output
+- Pose/expression stabilisation and a tighter face-parsing mask
+- Docker Compose (backend + built frontend)
+
+## Responsible use
+
+Use only faces you own or have explicit permission to use. Do not impersonate
+real, identifiable people. No watermark is burned into the output by default —
+add a disclosure label before sharing, and tell people when media is synthetic.
+All processing is local.

@@ -9,16 +9,18 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: str
     version: str
-    gpu_hint: str = "webgl-client"
+    engine_ready: bool = False
+    engine_error: str | None = None
+    provider: str = "CPUExecutionProvider"
+    missing_models: list[str] = Field(default_factory=list)
 
 
-class AvatarInfo(BaseModel):
+class IdentityInfo(BaseModel):
     id: str
     name: str
-    file_name: str
-    url: str
-    size_bytes: int
-    updated_at: float | None = None
+    thumbnail_url: str
+    created_at: float
+    face_box: list[float] | None = None
 
 
 class PresetPayload(BaseModel):
@@ -29,8 +31,3 @@ class PresetInfo(BaseModel):
     name: str
     data: dict[str, Any] = Field(default_factory=dict)
     updated_at: float | None = None
-
-
-class TrackingRoom(BaseModel):
-    room: str
-    clients: int

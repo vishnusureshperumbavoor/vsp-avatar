@@ -9,11 +9,13 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
-# Vendored at setup time (see README)
-frontend/public/mediapipe/
+# ONNX models (fetch at setup time, see README)
+# Keep the attribution file tracked so licensing stays in the repo.
+backend/models/*
+!backend/models/ATTRIBUTION.md
 
-# Runtime data
-backend/data/presets.json
+# Runtime data: presets + uploaded face identities
+backend/data/
 
 # Local env / logs
 .env
